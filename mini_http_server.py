@@ -1,109 +1,100 @@
-"""
-Mini HTTP Server — handles ONE request at a time (sequentially).
-- Accepts and parses a basic HTTP GET request.
-- Serves a file from the current directory with HTTP/1.1 headers.
-- Returns 404 Not Found if the file doesn't exist.
-"""
-
+# WebServer.py
 from socket import *
 import os
-import datetime
 
-HOST = ""          # Listen on all interfaces
-PORT = 6789        # Change if needed; must match the URL you test with
-BUF_SIZE = 4096
+# server port and socket
+serverPort = 6789
+serverSocket = socket(AF_INET, SOCK_STREAM)
+serverSocket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
 
-def http_date_now():
-    """Return current time formatted per RFC 1123 (GMT)."""
-    return datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
+# bind to all interfaces and start listening
+serverSocket.bind(('', serverPort))
+serverSocket.listen(1)
 
-def guess_type(path):
-    """Very small content-type mapper; good enough for the lab."""
-    path = path.lower()
-    if path.endswith('.html') or path.endswith('.htm'):
-        return 'text/html; charset=utf-8'
-    if path.endswith('.txt'):
-        return 'text/plain; charset=utf-8'
-    if path.endswith('.css'):
-        return 'text/css; charset=utf-8'
-    if path.endswith('.js'):
-        return 'application/javascript'
-    if path.endswith('.png'):
-        return 'image/png'
-    if path.endswith('.jpg') or path.endswith('.jpeg'):
-        return 'image/jpeg'
-    return 'application/octet-stream'
+print("web server running on port", serverPort)
+print("waiting for connection...\n")
 
-def build_response(status_code, body=b'', content_type='text/html; charset=utf-8'):
-    """Build a raw HTTP/1.1 response with minimal headers."""
-    reason = {200: 'OK', 404: 'Not Found', 400: 'Bad Request', 405: 'Method Not Allowed'}.get(status_code, 'OK')
-    headers = [
-        f'HTTP/1.1 {status_code} {reason}',
-        f'Date: {http_date_now()}',
-        'Server: MiniPythonServer/0.1',
-        f'Content-Length: {len(body)}',
-        'Connection: close'
-    ]
-    if status_code == 200:
-        headers.append(f'Content-Type: {content_type}')
-    head = '\r\n'.join(headers).encode('utf-8') + b'\r\n\r\n'
-    return head + body
+while True:
+    # accept a single client connection
+    connectionSocket, addr = serverSocket.accept()
+    print("connected to client:", addr)
 
-def serve_once(conn):
-    """Handle exactly one HTTP request on a connected socket."""
-    request = b''
-    # Read until end of headers or client closes
-    while b'\r\n\r\n' not in request:
-        chunk = conn.recv(BUF_SIZE)
-        if not chunk:
-            break
-        request += chunk
-
-    if not request:
-        return
-
-    # Minimal parse: first line like "GET /path HTTP/1.1"
     try:
-        first_line = request.split(b'\r\n', 1)[0].decode('iso-8859-1')
-        method, target, _version = first_line.split(' ', 2)
-    except Exception:
-        conn.sendall(build_response(400, b'Bad Request'))
-        return
+        # read raw http request
+        data = connectionSocket.recv(2048).decode('iso-8859-1')
+        if not data:
+            connectionSocket.close()
+            print("empty request, connection closed\n")
+            continue
 
-    if method != 'GET':
-        conn.sendall(build_response(405, b'Only GET supported'))
-        return
+        # parse request line and method/path
+        request_line = data.split("\r\n", 1)[0]
+        parts = request_line.split()
+        if len(parts) < 2 or parts[0] != "GET":
+            # bad request for non-get or malformed line
+            bad = "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"
+            connectionSocket.send(bad.encode())
+            connectionSocket.close()
+            print("sent 400 bad request\n")
+            continue
 
-    # Map "/" -> default file
-    if target == '/':
-        target = '/HelloWorld.html'
+        # resolve requested path
+        path = parts[1]
+        if path == "/":
+            path = "/HelloWorld.html"
+        filename = path.lstrip("/")
 
-    # Normalize path and prevent "../" traversal
-    safe_path = os.path.normpath(target.lstrip('/'))
-    if safe_path.startswith('..'):
-        conn.sendall(build_response(404, b'Not Found'))
-        return
-
-    if os.path.isfile(safe_path):
-        with open(safe_path, 'rb') as f:
+        with open(filename, "rb") as f:
             body = f.read()
-        conn.sendall(build_response(200, body, content_type=guess_type(safe_path)))
-    else:
-        body = b'<h1>404 Not Found</h1>'
-        conn.sendall(build_response(404, body))
 
-def main():
-    with socket(AF_INET, SOCK_STREAM) as srv:
-        srv.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
-        srv.bind((HOST, PORT))
-        srv.listen(1)
-        print(f'[+] Server listening on 0.0.0.0:{PORT} (one request at a time)')
-        while True:
-            conn, addr = srv.accept()
-            print(f'[+] Client connected from {addr[0]}:{addr[1]}')
-            with conn:
-                serve_once(conn)
-            print('[*] Request handled, connection closed. Ready for the next one...')
+        # simple content-type detection
+        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        mime = {
+            "html": "text/html",
+            "htm": "text/html",
+            "css": "text/css",
+            "js": "application/javascript",
+            "png": "image/png",
+            "jpg": "image/jpeg",
+            "jpeg": "image/jpeg",
+            "gif": "image/gif",
+            "txt": "text/plain"
+        }.get(ext, "application/octet-stream")
 
-if __name__ == '__main__':
-    main()
+        # send success headers and body
+        headers = [
+            "HTTP/1.1 200 OK",
+            f"Content-Type: {mime}",
+            f"Content-Length: {len(body)}",
+            "Connection: close",
+            "\r\n"
+        ]
+        connectionSocket.send("\r\n".join(headers).encode())
+        connectionSocket.sendall(body)
+        print("file sent:", filename, "\n")
+
+    except FileNotFoundError:
+        # send not found response
+        body = b"<html><body><h1>404 not found</h1></body></html>"
+        headers = [
+            "HTTP/1.1 404 Not Found",
+            "Content-Type: text/html",
+            f"Content-Length: {len(body)}",
+            "Connection: close",
+            "\r\n"
+        ]
+        connectionSocket.send("\r\n".join(headers).encode())
+        connectionSocket.sendall(body)
+        print("file not found, sent 404\n")
+
+    except Exception as e:
+        try:
+            response = "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\n"
+            connectionSocket.send(response.encode())
+        except:
+            pass
+        print("internal error:", e, "\n")
+
+    finally:
+        connectionSocket.close()        # close connection after serving one request
+        print("connection closed\n")
